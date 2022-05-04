@@ -4,7 +4,7 @@ pragma experimental ABIEncoderV2;
 
 import "./wfCashBase.sol";
 import "./lib/AllowfCashReceiver.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "openzeppelin-contracts-V4/security/ReentrancyGuard.sol";
 
 /// @dev This implementation contract is deployed as an UpgradeableBeacon. Each BeaconProxy
 /// that uses this contract as an implementation will call initialize to set its own fCash id.

@@ -6,10 +6,10 @@ import "./lib/DateTime.sol";
 import "./lib/EncodeDecode.sol";
 import "../interfaces/notional/INotionalV2.sol";
 import "../interfaces/notional/IWrappedfCash.sol";
-import "@openzeppelin/contracts/utils/Strings.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import "openzeppelin-contracts-V4/utils/Strings.sol";
+import "openzeppelin-contracts-V4/token/ERC20/IERC20.sol";
+import "openzeppelin-contracts-V4/token/ERC20/utils/SafeERC20.sol";
+import "openzeppelin-contracts-V4/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin-upgradeable/contracts/token/ERC777/ERC777Upgradeable.sol";
 
 abstract contract wfCashBase is ERC777Upgradeable, IWrappedfCash {
