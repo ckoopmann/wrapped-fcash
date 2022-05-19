@@ -3,6 +3,7 @@ import brownie
 import eth_abi
 from tests.helpers import get_balance_trade_action, get_lend_action
 from brownie import Contract, wfCashERC4626, network, nUpgradeableBeacon
+from brownie.project import WrappedFcashProject
 from brownie.convert.datatypes import Wei
 from brownie.convert import to_bytes
 from brownie.network import Chain
@@ -26,7 +27,7 @@ def env():
 
 @pytest.fixture() 
 def beacon(wfCashERC4626, nUpgradeableBeacon, env):
-    impl = wfCashERC4626.deploy(env.notional.address, {"from": env.deployer})
+    impl = wfCashERC4626.deploy(env.notional.address, env.tokens['WETH'], {"from": env.deployer})
     return nUpgradeableBeacon.deploy(impl.address, {"from": env.deployer})
 
 @pytest.fixture() 
@@ -132,12 +133,12 @@ def test_cannot_deploy_invalid_maturity(factory, env):
 
 # Test Minting fCash
 def test_only_accepts_notional_v2(wrapper, beacon, lender, env):
-    impl = wfCashERC4626.deploy(env.deployer.address, {"from": env.deployer})
+    impl = wfCashERC4626.deploy(env.deployer.address, env.tokens["WETH"].address, {"from": env.deployer})
 
     # Change the address of notional on the beacon
     beacon.upgradeTo(impl.address)
 
-    with brownie.reverts("Invalid caller"):
+    with brownie.reverts("Invalid"):
         env.notional.safeTransferFrom(
             lender.address,
             wrapper.address,
@@ -165,7 +166,7 @@ def test_cannot_transfer_invalid_fcash(lender, factory, env):
         )
 
 def test_cannot_transfer_batch_fcash(wrapper, lender, env):
-    with brownie.reverts("Not accepted"):
+    with brownie.reverts():
         env.notional.safeBatchTransferFrom(
             lender.address,
             wrapper.address,
@@ -513,28 +514,28 @@ def test_lend_via_erc1155_action_underlying_token(wrapper, env, accounts):
 # ERC4626 tests
 def test_deposit_4626(wrapper, env, lender):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
 
+    # There is a little drift between these two calls
     preview = wrapper.previewDeposit(100e18)
-    wrapper.deposit(100e18, lender.address, {"from": lender})
+    txn = wrapper.deposit(100e18, lender.address, {"from": lender})
 
-    assert wrapper.balanceOf(lender.address) == preview
+    assert pytest.approx(wrapper.balanceOf(lender.address), abs=100) == preview
+    assert txn.events['Deposit']['shares'] == wrapper.balanceOf(lender.address)
 
 def test_deposit_receiver_4626(wrapper, env, lender, accounts):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
 
     preview = wrapper.previewDeposit(100e18)
-    wrapper.deposit(100e18, accounts[0].address, {"from": lender})
+    txn = wrapper.deposit(100e18, accounts[0].address, {"from": lender})
 
-    assert wrapper.balanceOf(accounts[0].address) == preview
+    assert pytest.approx(wrapper.balanceOf(accounts[0].address), abs=100) == preview
+    assert txn.events['Deposit']['shares'] == wrapper.balanceOf(accounts[0].address)
     assert wrapper.balanceOf(lender.address) == 0
 
 def test_deposit_matured_4626(wrapper, env, lender):
     chain.mine(1, timestamp=wrapper.getMaturity())
 
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
 
     with brownie.reverts("Matured"):
         wrapper.previewDeposit(100e18)
@@ -544,26 +545,24 @@ def test_deposit_matured_4626(wrapper, env, lender):
 
 def test_mint_4626(wrapper, env, lender):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     daiBalanceBefore = env.tokens["DAI"].balanceOf(lender.address)
 
     assets = wrapper.previewMint(100e8)
     wrapper.mint(100e8, lender.address, {"from": lender})
     daiBalanceAfter = env.tokens["DAI"].balanceOf(lender.address)
 
-    assert pytest.approx(daiBalanceBefore - daiBalanceAfter, abs=1) == assets
+    assert pytest.approx(daiBalanceBefore - daiBalanceAfter, abs=1e11) == assets
     assert wrapper.balanceOf(lender.address) == 100e8
 
 def test_mint_receiver_4626(wrapper, env, lender, accounts):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     daiBalanceBefore = env.tokens["DAI"].balanceOf(lender.address)
 
     assets = wrapper.previewMint(100e8)
     wrapper.mint(100e8, accounts[0].address, {"from": lender})
     daiBalanceAfter = env.tokens["DAI"].balanceOf(lender.address)
 
-    assert pytest.approx(daiBalanceBefore - daiBalanceAfter, abs=1) == assets
+    assert pytest.approx(daiBalanceBefore - daiBalanceAfter, abs=1e11) == assets
     assert wrapper.balanceOf(lender.address) == 0
     assert wrapper.balanceOf(accounts[0].address) == 100e8
 
@@ -576,7 +575,6 @@ def test_mint_deposit_matured_4626(wrapper, env, lender):
 
 def test_withdraw_4626(wrapper, env, lender, accounts):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     wrapper.mint(100e8, lender.address, {"from": lender})
     balanceBefore = wrapper.balanceOf(lender.address)
     daiBalanceBefore = env.tokens["DAI"].balanceOf(lender.address)
@@ -586,22 +584,20 @@ def test_withdraw_4626(wrapper, env, lender, accounts):
     balanceAfter = wrapper.balanceOf(lender.address)
     daiBalanceAfter = env.tokens["DAI"].balanceOf(lender.address)
     assert balanceBefore - balanceAfter == shares
-    assert pytest.approx(daiBalanceAfter - daiBalanceBefore, rel=1e-9) == 50e18
+    assert pytest.approx(daiBalanceAfter - daiBalanceBefore, abs=1e11) == 50e18
 
 def test_withdraw_receiver_4626(wrapper, env, lender, accounts):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     wrapper.mint(100e8, lender.address, {"from": lender})
     balanceBefore = wrapper.balanceOf(lender.address)
 
     shares = wrapper.previewWithdraw(50e18)
     wrapper.withdraw(50e18, accounts[0].address, lender.address, {'from': lender.address})
     assert wrapper.balanceOf(lender.address) == balanceBefore - shares
-    assert pytest.approx(env.tokens['DAI'].balanceOf(accounts[0].address), rel=1e-9) == 50e18
+    assert pytest.approx(env.tokens['DAI'].balanceOf(accounts[0].address), abs=1e11) == 50e18
 
 def test_withdraw_allowance_4626(wrapper, env, lender, accounts):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     wrapper.mint(100e8, lender.address, {"from": lender})
     balanceBefore = wrapper.balanceOf(lender.address)
 
@@ -616,30 +612,29 @@ def test_withdraw_allowance_4626(wrapper, env, lender, accounts):
     wrapper.approve(accounts[0].address, 100e8, {'from': lender})
 
     shares = wrapper.previewWithdraw(50e18)
-    wrapper.withdraw(50e18, accounts[0].address, lender.address, {'from': accounts[0].address})
-    assert wrapper.balanceOf(lender.address) == balanceBefore - shares
-    assert pytest.approx(env.tokens['DAI'].balanceOf(accounts[0].address), rel=1e-9) == 50e18
+    txn = wrapper.withdraw(50e18, accounts[0].address, lender.address, {'from': accounts[0].address})
+    assert pytest.approx(shares, abs=100) == txn.events["Withdraw"]["shares"]
+    assert wrapper.balanceOf(lender.address) == balanceBefore - txn.events["Withdraw"]["shares"]
+    assert pytest.approx(env.tokens['DAI'].balanceOf(accounts[0].address), abs=1e11) == 50e18
 
 def test_withdraw_matured_4626(wrapper, env, lender, accounts):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     wrapper.mint(100e8, lender.address, {"from": lender})
 
     chain.mine(1, timestamp=wrapper.getMaturity())
     balanceBefore = wrapper.balanceOf(lender.address)
 
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     env.notional.settleAccount(wrapper.address, {"from": lender})
 
     shares = wrapper.previewWithdraw(50e18)
     txn = wrapper.withdraw(50e18, accounts[0].address, lender.address, {'from': lender})
-    assert wrapper.balanceOf(lender.address) == balanceBefore - shares
+    assert pytest.approx(shares, abs=100) == txn.events["Withdraw"]["shares"]
+    assert wrapper.balanceOf(lender.address) == balanceBefore - txn.events["Withdraw"]["shares"]
     assert env.tokens['DAI'].balanceOf(accounts[0].address) > 50e18
     assert env.tokens['DAI'].balanceOf(accounts[0].address) < 50.1e18
 
 def test_redeem_4626(wrapper, env, lender, accounts):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     wrapper.mint(100e8, lender.address, {"from": lender})
     balanceBefore = wrapper.balanceOf(lender.address)
     daiBalanceBefore = env.tokens["DAI"].balanceOf(lender.address)
@@ -649,22 +644,20 @@ def test_redeem_4626(wrapper, env, lender, accounts):
     balanceAfter = wrapper.balanceOf(lender.address)
     daiBalanceAfter = env.tokens["DAI"].balanceOf(lender.address)
     assert balanceBefore - balanceAfter == 50e8
-    assert pytest.approx(daiBalanceAfter - daiBalanceBefore, rel=1e-9) == assets
+    assert pytest.approx(daiBalanceAfter - daiBalanceBefore, abs=1e11) == assets
 
 def test_redeem_receiver_4626(wrapper, env, accounts, lender):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     wrapper.mint(100e8, lender.address, {"from": lender})
     balanceBefore = wrapper.balanceOf(lender.address)
 
     assets = wrapper.previewRedeem(100e8)
     wrapper.redeem(100e8, accounts[0].address, lender.address, {'from': lender.address})
     assert wrapper.balanceOf(lender.address) == 0
-    assert pytest.approx(env.tokens['DAI'].balanceOf(accounts[0].address), rel=1e-9) == assets
+    assert pytest.approx(env.tokens['DAI'].balanceOf(accounts[0].address), abs=1e11) == assets
 
 def test_redeem_allowance_4626(wrapper, env, accounts, lender):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     wrapper.mint(100e8, lender.address, {"from": lender})
     balanceBefore = wrapper.balanceOf(lender.address)
 
@@ -681,17 +674,15 @@ def test_redeem_allowance_4626(wrapper, env, accounts, lender):
     assets = wrapper.previewRedeem(50e8)
     wrapper.redeem(50e8, accounts[0].address, lender.address, {'from': accounts[0].address})
     assert wrapper.balanceOf(lender.address) == balanceBefore - 50e8
-    assert pytest.approx(env.tokens['DAI'].balanceOf(accounts[0].address), rel=1e-9) == assets
+    assert pytest.approx(env.tokens['DAI'].balanceOf(accounts[0].address), abs=1e11) == assets
 
 def test_redeem_matured_4626(wrapper, env, accounts, lender):
     env.tokens["DAI"].approve(wrapper.address, 2 ** 255 - 1, {'from': lender})
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     wrapper.mint(100e8, lender.address, {"from": lender})
 
     chain.mine(1, timestamp=wrapper.getMaturity())
     balanceBefore = wrapper.balanceOf(lender.address)
 
-    env.tokens["cDAI"].accrueInterest({"from": lender})
     env.notional.settleAccount(wrapper.address, {"from": lender})
 
     assets = wrapper.previewRedeem(100e8)
@@ -699,3 +690,56 @@ def test_redeem_matured_4626(wrapper, env, accounts, lender):
     assert wrapper.balanceOf(lender.address) == 0
     assert env.tokens['DAI'].balanceOf(accounts[0].address) > 100e18
     assert env.tokens['DAI'].balanceOf(accounts[0].address) < 100.1e18
+
+def test_mint_and_redeem_via_weth(factory, env, accounts, lender):
+    markets = env.notional.getActiveMarkets(1)
+    txn = factory.deployWrapper(1, markets[0][1])
+    wrapper = Contract.from_abi("Wrapper", txn.events['WrapperDeployed']['wrapper'], wfCashERC4626.abi)
+    wethABI = WrappedFcashProject._build.get("WETH9")["abi"]
+    weth = Contract.from_abi("WETH", env.tokens["WETH"], wethABI)
+    
+    account = accounts[1]
+    weth.deposit({'from': account, 'value': 1e18})
+
+    env.tokens['WETH'].approve(wrapper.address, 2**255-1, {"from": account})
+    balanceBefore = env.tokens["WETH"].balanceOf(account)
+    wrapper.mintViaUnderlying(1e18, 1e8, account.address, 0, {"from": account})
+    balanceAfter = env.tokens["WETH"].balanceOf(account)
+
+    assert wrapper.balanceOf(account) == 1e8
+    # There is some residual WETH left
+    assert 0.98e18 <= balanceBefore - balanceAfter and balanceBefore - balanceAfter <= 1e18
+
+    # Redeem to underlying mints WETH
+    wrapper.redeemToUnderlying(1e8, accounts[2].address, 0, {'from': account})
+    assert wrapper.balanceOf(account.address) == 0
+    assert env.tokens['WETH'].balanceOf(accounts[2].address) > 0.98e18
+    assert env.tokens['WETH'].balanceOf(accounts[2].address) < 1e18
+
+def test_mint_redeem_eth_4626(factory, env, lender, accounts):
+    markets = env.notional.getActiveMarkets(1)
+    txn = factory.deployWrapper(1, markets[0][1])
+    wrapper = Contract.from_abi("Wrapper", txn.events['WrapperDeployed']['wrapper'], wfCashERC4626.abi)
+    wethABI = WrappedFcashProject._build.get("WETH9")["abi"]
+    weth = Contract.from_abi("WETH", env.tokens["WETH"], wethABI)
+    
+    account = accounts[1]
+    weth.deposit({'from': account, 'value': 1e18})
+    
+    env.tokens['WETH'].approve(wrapper.address, 2**255-1, {"from": account})
+    wrapper.mint(1e8, account.address, {"from": account})
+    assert wrapper.balanceOf(account.address) == 1e8
+    assert env.tokens["WETH"].balanceOf(account) < 0.1e18
+
+    wrapper.redeem(1e8, account.address, account.address, {"from": account})
+    assert env.tokens["WETH"].balanceOf(account) > 0.95e18
+    assert wrapper.balanceOf(account.address) == 0
+
+    wrapper.deposit(0.95e18, account.address, {"from": account})
+    assert wrapper.balanceOf(account.address) > 0.95e8
+    assert env.tokens["WETH"].balanceOf(account) < 0.05e18
+
+    chain.mine(1, timestamp=wrapper.getMaturity())
+    env.notional.settleAccount(wrapper.address, {"from": account})
+    wrapper.redeem(wrapper.balanceOf(account), account.address, account.address, {"from": account})
+    assert env.tokens["WETH"].balanceOf(account) > 0.95e18

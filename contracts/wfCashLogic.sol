@@ -3,16 +3,19 @@ pragma solidity 0.8.11;
 pragma experimental ABIEncoderV2;
 
 import "./wfCashBase.sol";
-import "./lib/AllowfCashReceiver.sol";
 import "openzeppelin-contracts-V4/security/ReentrancyGuard.sol";
 
 /// @dev This implementation contract is deployed as an UpgradeableBeacon. Each BeaconProxy
 /// that uses this contract as an implementation will call initialize to set its own fCash id.
 /// That identifier will represent the fCash that this ERC20 wrapper can hold.
-abstract contract wfCashLogic is wfCashBase, AllowfCashReceiver, ReentrancyGuard {
+abstract contract wfCashLogic is wfCashBase, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    // bytes4(keccak256("onERC1155Received(address,address,uint256,uint256,bytes)"))
+    bytes4 internal constant ERC1155_ACCEPTED = 0xf23a6e61;
+    // bytes4(keccak256("onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)"))
+    bytes4 internal constant ERC1155_BATCH_ACCEPTED = 0xbc197c81;
 
-    constructor(INotionalV2 _notional) wfCashBase(_notional) {}
+    constructor(INotionalV2 _notional, WETH9 _weth) wfCashBase(_notional, _weth) {}
 
     /***** Mint Methods *****/
 
@@ -52,26 +55,50 @@ abstract contract wfCashLogic is wfCashBase, AllowfCashReceiver, ReentrancyGuard
         bool useUnderlying
     ) internal nonReentrant {
         require(!hasMatured(), "fCash matured");
-        (IERC20 token, /* bool isETH */) = getToken(useUnderlying);
-        uint256 balanceBefore = token.balanceOf(address(this));
+        (IERC20 token, bool isETH) = getToken(useUnderlying);
+        uint256 balanceBefore = isETH ? address(this).balance : token.balanceOf(address(this));
 
-        // Transfers tokens in for lending, Notional will transfer from this contract.
-        token.safeTransferFrom(msg.sender, address(this), depositAmountExternal);
+        // If dealing in ETH, we use WETH in the wrapper instead of ETH. NotionalV2 uses
+        // ETH natively but due to pull payment requirements for batchLend, it does not support
+        // ETH. batchLend only supports ERC20 tokens like cETH or aETH. Since the wrapper is a compatibility
+        // layer, it will support WETH so integrators can deal solely in ERC20 tokens. Instead of using
+        // "batchLend" we will use "batchBalanceActionWithTrades". The difference is that "batchLend"
+        // is more gas efficient (does not require and additional redeem call to asset tokens). If using cETH
+        // then everything will proceed via batchLend.
+        if (isETH) {
+            IERC20((address(WETH))).safeTransferFrom(msg.sender, address(this), depositAmountExternal);
+            WETH.withdraw(depositAmountExternal);
 
-        // Executes a lending action on Notional
-        BatchLend[] memory action = EncodeDecode.encodeLendTrade(
-            getCurrencyId(),
-            getMarketIndex(),
-            fCashAmount,
-            minImpliedRate,
-            useUnderlying
-        );
-        NotionalV2.batchLend(address(this), action);
+            BalanceActionWithTrades[] memory action = EncodeDecode.encodeLendETHTrade(
+                getCurrencyId(),
+                getMarketIndex(),
+                depositAmountExternal,
+                fCashAmount,
+                minImpliedRate
+            );
+            // Notional will return any residual ETH as the native token. When we _sendTokensToReceiver those
+            // native ETH tokens will be wrapped back to WETH.
+            NotionalV2.batchBalanceAndTradeAction{value: depositAmountExternal}(address(this), action);
+        } else {
+            // Transfers tokens in for lending, Notional will transfer from this contract.
+            token.safeTransferFrom(msg.sender, address(this), depositAmountExternal);
 
-        // Mints ERC20 tokens for the receiver
+            // Executes a lending action on Notional
+            BatchLend[] memory action = EncodeDecode.encodeLendTrade(
+                getCurrencyId(),
+                getMarketIndex(),
+                fCashAmount,
+                minImpliedRate,
+                useUnderlying
+            );
+            NotionalV2.batchLend(address(this), action);
+        }
+
+        // Mints ERC20 tokens for the receiver, the false flag denotes that we will not do an
+        // operatorAck
         _mint(receiver, fCashAmount, "", "", false);
 
-        _sendTokensToReceiver(token, msg.sender, false, balanceBefore);
+        _sendTokensToReceiver(token, msg.sender, isETH, balanceBefore);
     }
 
     /// @notice This hook will be called every time this contract receives fCash, will validate that
@@ -83,30 +110,30 @@ abstract contract wfCashLogic is wfCashBase, AllowfCashReceiver, ReentrancyGuard
         uint256 _id,
         uint256 _value,
         bytes calldata _data
-    ) external override nonReentrant returns (bytes4) {
-        // Only accept erc1155 transfers from NotionalV2
-        require(msg.sender == address(NotionalV2), "Invalid caller");
-        // Only accept the fcash id that corresponds to the listed currency and maturity
+    ) external nonReentrant returns (bytes4) {
         uint256 fCashID = getfCashId();
-        require(_id == fCashID, "Invalid fCash asset");
-        // Protect against signed value underflows
-        require(int256(_value) > 0, "Invalid value");
+        // Only accept erc1155 transfers from NotionalV2
+        require(
+            msg.sender == address(NotionalV2) &&
+            // Only accept the fcash id that corresponds to the listed currency and maturity
+            _id == fCashID &&
+            // Protect against signed value underflows
+            int256(_value) > 0,
+            "Invalid"
+        );
 
         // Double check the account's position, these are not strictly necessary and add gas costs
         // but might be good safe guards
         AccountContext memory ac = NotionalV2.getAccountContext(address(this));
-        require(ac.hasDebt == 0x00, "Incurred debt");
-        PortfolioAsset[] memory assets = NotionalV2.getAccountPortfolio(
-            address(this)
-        );
-        require(assets.length == 1, "Invalid assets");
+        PortfolioAsset[] memory assets = NotionalV2.getAccountPortfolio(address(this));
         require(
+            ac.hasDebt == 0x00 &&
+            assets.length == 1 &&
             EncodeDecode.encodeERC1155Id(
                 assets[0].currencyId,
                 assets[0].maturity,
                 assets[0].assetType
-            ) == fCashID,
-            "Invalid portfolio asset"
+            ) == fCashID
         );
 
         // Update per account fCash balance, calldata from the ERC1155 call is
@@ -122,17 +149,6 @@ abstract contract wfCashLogic is wfCashBase, AllowfCashReceiver, ReentrancyGuard
 
         // This will allow the fCash to be accepted
         return ERC1155_ACCEPTED;
-    }
-
-    /// @dev Do not accept batches of fCash
-    function onERC1155BatchReceived(
-        address, /* _operator */
-        address, /* _from */
-        uint256[] calldata, /* _ids */
-        uint256[] calldata, /* _values */
-        bytes calldata /* _data */
-    ) external pure override returns (bytes4) {
-        return 0;
     }
 
     /***** Redeem (Burn) Methods *****/
@@ -289,8 +305,8 @@ abstract contract wfCashLogic is wfCashBase, AllowfCashReceiver, ReentrancyGuard
         tokensTransferred = balanceAfter - balanceBefore;
 
         if (isETH) {
-            (bool success, /* */) = payable(receiver).call{value: tokensTransferred}("");
-            require(success);
+            WETH.deposit{value: tokensTransferred}();
+            IERC20(address(WETH)).safeTransfer(receiver, tokensTransferred);
         } else {
             token.safeTransfer(receiver, tokensTransferred);
         }
