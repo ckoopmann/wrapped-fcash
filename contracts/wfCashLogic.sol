@@ -15,7 +15,7 @@ abstract contract wfCashLogic is wfCashBase, ReentrancyGuard {
     // bytes4(keccak256("onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)"))
     bytes4 internal constant ERC1155_BATCH_ACCEPTED = 0xbc197c81;
 
-    constructor(INotionalV2 _notional, WETH9 _weth) wfCashBase(_notional, _weth) {}
+    constructor(INotionalV2 _notional, IWETH9 _weth) wfCashBase(_notional, _weth) {}
 
     /***** Mint Methods *****/
 

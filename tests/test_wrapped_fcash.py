@@ -695,7 +695,7 @@ def test_mint_and_redeem_via_weth(factory, env, accounts, lender):
     markets = env.notional.getActiveMarkets(1)
     txn = factory.deployWrapper(1, markets[0][1])
     wrapper = Contract.from_abi("Wrapper", txn.events['WrapperDeployed']['wrapper'], wfCashERC4626.abi)
-    wethABI = WrappedFcashProject._build.get("WETH9")["abi"]
+    wethABI = WrappedFcashProject._build.get("IWETH9")["abi"]
     weth = Contract.from_abi("WETH", env.tokens["WETH"], wethABI)
     
     account = accounts[1]
@@ -720,7 +720,7 @@ def test_mint_redeem_eth_4626(factory, env, lender, accounts):
     markets = env.notional.getActiveMarkets(1)
     txn = factory.deployWrapper(1, markets[0][1])
     wrapper = Contract.from_abi("Wrapper", txn.events['WrapperDeployed']['wrapper'], wfCashERC4626.abi)
-    wethABI = WrappedFcashProject._build.get("WETH9")["abi"]
+    wethABI = WrappedFcashProject._build.get("IWETH9")["abi"]
     weth = Contract.from_abi("WETH", env.tokens["WETH"], wethABI)
     
     account = accounts[1]

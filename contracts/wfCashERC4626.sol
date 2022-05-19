@@ -5,7 +5,7 @@ import "./wfCashLogic.sol";
 import "../interfaces/IERC4626.sol";
 
 contract wfCashERC4626 is IERC4626, wfCashLogic {
-    constructor(INotionalV2 _notional, WETH9 _weth) wfCashLogic(_notional, _weth) {}
+    constructor(INotionalV2 _notional, IWETH9 _weth) wfCashLogic(_notional, _weth) {}
 
     /** @dev See {IERC4262-asset} */
     function asset() public view override returns (address) {
